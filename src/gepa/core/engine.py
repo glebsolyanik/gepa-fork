@@ -2,7 +2,7 @@
 # https://github.com/gepa-ai/gepa
 
 import traceback
-from typing import Generic
+from typing import Generic, Any
 
 from gepa.core.adapter import DataInst, EvaluatorFn, RolloutOutput, Trajectory
 from gepa.core.data_loader import DataId, DataLoader, ensure_loader
@@ -83,18 +83,31 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         self,
         program: dict[str, str],
         state: GEPAState[RolloutOutput, DataId],
-    ) -> tuple[dict[DataId, RolloutOutput], dict[DataId, float]]:
+    ) -> tuple[
+        dict[DataId, RolloutOutput], 
+        dict[DataId, float],
+        dict[DataId, Any] | None,
+        dict[DataId, Any] | None,
+    ]:
         valset = self.valset
         assert valset is not None
 
         val_ids = self.val_evaluation_policy.get_eval_batch(valset, state)
         batch = valset.fetch(val_ids)
-        outputs, scores = self.evaluator(batch, program)
+        outputs, scores, predictions, ground_truth = self.evaluator(batch, program)
         assert len(outputs) == len(val_ids), "Eval outputs should match length of selected validation indices"
+
+        if predictions is not None:
+            assert len(predictions) == len(val_ids), "Eval predictions should match length of selected validation indices"
+        if ground_truth is not None:
+            assert len(ground_truth) == len(val_ids), "Eval ground_truth should match length of selected validation indices"
 
         outputs_by_val_idx = dict(zip(val_ids, outputs, strict=False))
         scores_by_val_idx = dict(zip(val_ids, scores, strict=False))
-        return outputs_by_val_idx, scores_by_val_idx
+        predictions_by_val_idx = dict(zip(val_ids, predictions, strict=False)) if predictions else None
+        ground_truth_by_val_idx = dict(zip(val_ids, ground_truth, strict=False)) if ground_truth else None
+
+        return outputs_by_val_idx, scores_by_val_idx, predictions_by_val_idx, ground_truth_by_val_idx
 
     def _get_pareto_front_programs(self, state: GEPAState[RolloutOutput, DataId]) -> dict[DataId, set[ProgramIdx]]:
         return state.program_at_pareto_front_valset
@@ -107,7 +120,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
     ) -> tuple[int, int]:
         num_metric_calls_by_discovery = state.total_num_evals
 
-        valset_outputs, valset_subscores = self._evaluate_on_valset(new_program, state)
+        valset_outputs, valset_subscores, valset_predictions, valset_ground_truth = self._evaluate_on_valset(new_program, state)
 
         state.num_full_ds_evals += 1
         state.total_num_evals += len(valset_subscores)
@@ -119,6 +132,8 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             valset_subscores=valset_subscores,
             run_dir=self.run_dir,
             num_metric_calls_by_discovery_of_new_program=num_metric_calls_by_discovery,
+            valset_predictions=valset_predictions,
+            valset_ground_truth=valset_ground_truth,
         )
         state.full_program_trace[-1]["new_program_idx"] = new_program_idx
         state.full_program_trace[-1]["evaluated_val_indices"] = sorted(valset_subscores.keys())
@@ -180,13 +195,27 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         if valset is None:
             raise ValueError("valset must be provided to GEPAEngine.run()")
 
-        def valset_evaluator(program: dict[str, str]) -> tuple[dict[DataId, RolloutOutput], dict[DataId, float]]:
+        def valset_evaluator(program: dict[str, str]) -> tuple[
+            dict[DataId, RolloutOutput], 
+            dict[DataId, float],
+            dict[DataId, Any] | None,
+            dict[DataId, Any] | None,
+        ]:
             all_ids = list(valset.all_ids())
-            all_outputs, all_scores = self.evaluator(valset.fetch(all_ids), program)
-            return (
-                dict(zip(all_ids, all_outputs, strict=False)),
-                dict(zip(all_ids, all_scores, strict=False)),
-            )
+            all_outputs, all_scores, all_predictions, all_ground_truth = self.evaluator(valset.fetch(all_ids), program)
+
+            if all_predictions is not None:
+                assert len(all_predictions) == len(all_ids), "Eval predictions should match length of valset"
+            if all_ground_truth is not None:
+                assert len(all_ground_truth) == len(all_ids), "Eval ground_truth should match length of valset"
+
+            
+            outputs_dict = dict(zip(all_ids, all_outputs, strict=False))
+            scores_dict = dict(zip(all_ids, all_scores, strict=False))
+            predictions_dict = dict(zip(all_ids, all_predictions, strict=False)) if all_predictions else None
+            ground_truth_dict = dict(zip(all_ids, all_ground_truth, strict=False)) if all_ground_truth else None
+            
+            return outputs_dict, scores_dict, predictions_dict, ground_truth_dict
 
         # Initialize state
         state = initialize_gepa_state(
@@ -198,10 +227,12 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         )
 
         # Log base program score
-        base_val_avg, base_val_coverage = state.get_program_average_val_subset(0)
+        base_val_score = self.val_evaluation_policy.get_valset_score(0, state)
+        base_val_coverage = len(state.prog_candidate_val_subscores[0])
+
         self.experiment_tracker.log_metrics(
             {
-                "base_program_full_valset_score": base_val_avg,
+                "base_program_full_valset_score": base_val_score,
                 "base_program_val_coverage": base_val_coverage,
                 "iteration": state.i + 1,
             },
@@ -209,7 +240,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         )
 
         self.logger.log(
-            f"Iteration {state.i + 1}: Base program full valset score: {base_val_avg} "
+            f"Iteration {state.i + 1}: Base program full valset score: {base_val_score} "
             f"over {base_val_coverage} / {len(valset)} examples"
         )
 
@@ -238,27 +269,87 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                         self.merge_proposer.last_iter_found_new_program = False  # old behavior
 
                         if proposal is not None and proposal.tag == "merge":
-                            parent_sums = proposal.subsample_scores_before or [float("-inf"), float("-inf")]
-                            new_sum = sum(proposal.subsample_scores_after or [])
-
-                            if new_sum >= max(parent_sums):
-                                # ACCEPTED: consume one merge attempt and record it
-                                self._run_full_eval_and_add(
-                                    new_program=proposal.candidate,
-                                    state=state,
-                                    parent_program_idx=proposal.parent_program_ids,
-                                )
-                                self.merge_proposer.merges_due -= 1
-                                self.merge_proposer.total_merges_tested += 1
-                                continue  # skip reflective this iteration
+                            # Используем F2 для minibatch если доступны predictions и ground_truth
+                            if (proposal.subsample_predictions_before and 
+                                proposal.subsample_predictions_after and 
+                                proposal.subsample_ground_truth and
+                                len(proposal.subsample_predictions_before) == 2):  # Два родителя для merge
+                                
+                                # Вычисляем F2 для обоих родителей и нового кандидата
+                                parent_f2_scores = []
+                                for parent_preds in proposal.subsample_predictions_before:
+                                    if parent_preds and len(parent_preds) == len(proposal.subsample_ground_truth):
+                                        parent_preds_dict = dict(enumerate(parent_preds))
+                                        ground_truth_dict = dict(enumerate(proposal.subsample_ground_truth))
+                                        
+                                        parent_f2 = self.val_evaluation_policy.compute_metric(
+                                            parent_preds_dict,
+                                            ground_truth_dict
+                                        )
+                                        parent_f2_scores.append(parent_f2)
+                                    else:
+                                        parent_f2_scores.append(float("-inf"))
+                                
+                                # Вычисляем F2 для нового кандидата
+                                if len(proposal.subsample_predictions_after) == len(proposal.subsample_ground_truth):
+                                    new_preds_dict = dict(enumerate(proposal.subsample_predictions_after))
+                                    ground_truth_dict = dict(enumerate(proposal.subsample_ground_truth))
+                                    
+                                    new_f2 = self.val_evaluation_policy.compute_metric(
+                                        new_preds_dict,
+                                        ground_truth_dict
+                                    )
+                                    
+                                    max_parent_f2 = max(parent_f2_scores) if parent_f2_scores else float("-inf")
+                                    
+                                    if new_f2 >= max_parent_f2:
+                                        # ACCEPTED: используем F2
+                                        self.logger.log(
+                                            f"Iteration {state.i + 1}: New program F2 score {new_f2} "
+                                            f"is better than or equal to max parent F2 {max_parent_f2}, accepting merge"
+                                        )
+                                        self._run_full_eval_and_add(
+                                            new_program=proposal.candidate,
+                                            state=state,
+                                            parent_program_idx=proposal.parent_program_ids,
+                                        )
+                                        self.merge_proposer.merges_due -= 1
+                                        self.merge_proposer.total_merges_tested += 1
+                                        continue  # skip reflective this iteration
+                                    else:
+                                        # REJECTED
+                                        self.logger.log(
+                                            f"Iteration {state.i + 1}: New program F2 score {new_f2} "
+                                            f"is worse than both parents {parent_f2_scores}, skipping merge"
+                                        )
+                                        continue
+                                else:
+                                    self.logger.log(
+                                        f"Iteration {state.i + 1}: Mismatch in predictions/ground_truth lengths, "
+                                        f"falling back to sum() for merge acceptance"
+                                    )
                             else:
-                                # REJECTED: do NOT consume merges_due or total_merges_tested
-                                self.logger.log(
-                                    f"Iteration {state.i + 1}: New program subsample score {new_sum} "
-                                    f"is worse than both parents {parent_sums}, skipping merge"
-                                )
-                                # Skip reflective this iteration (old behavior)
-                                continue
+                                parent_sums = proposal.subsample_scores_before or [float("-inf"), float("-inf")]
+                                new_sum = sum(proposal.subsample_scores_after or [])
+
+                                if new_sum >= max(parent_sums):
+                                    # ACCEPTED: consume one merge attempt and record it
+                                    self._run_full_eval_and_add(
+                                        new_program=proposal.candidate,
+                                        state=state,
+                                        parent_program_idx=proposal.parent_program_ids,
+                                    )
+                                    self.merge_proposer.merges_due -= 1
+                                    self.merge_proposer.total_merges_tested += 1
+                                    continue  # skip reflective this iteration
+                                else:
+                                    # REJECTED: do NOT consume merges_due or total_merges_tested
+                                    self.logger.log(
+                                        f"Iteration {state.i + 1}: New program subsample score {new_sum} "
+                                        f"is worse than both parents {parent_sums}, skipping merge"
+                                    )
+                                    # Skip reflective this iteration (old behavior)
+                                    continue
 
                     # Old behavior: regardless of whether we attempted, clear the flag before reflective
                     self.merge_proposer.last_iter_found_new_program = False
@@ -269,18 +360,59 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     self.logger.log(f"Iteration {state.i + 1}: Reflective mutation did not propose a new candidate")
                     continue
 
-                # Acceptance: require strict improvement on subsample
-                old_sum = sum(proposal.subsample_scores_before or [])
-                new_sum = sum(proposal.subsample_scores_after or [])
-                if new_sum <= old_sum:
-                    self.logger.log(
-                        f"Iteration {state.i + 1}: New subsample score {new_sum} is not better than old score {old_sum}, skipping"
-                    )
-                    continue
+                if (proposal.subsample_predictions_before and 
+                    proposal.subsample_predictions_after and 
+                    proposal.subsample_ground_truth and
+                    len(proposal.subsample_predictions_before) == 1):  # Один родитель для reflective mutation
+                    
+                    # Извлекаем predictions старого кандидата (первый и единственный элемент списка)
+                    old_predictions = proposal.subsample_predictions_before[0]
+                    
+                    if (old_predictions and 
+                        len(old_predictions) == len(proposal.subsample_predictions_after) and
+                        len(proposal.subsample_predictions_after) == len(proposal.subsample_ground_truth)):
+                        
+                        # Вычисляем F2 для старого кандидата
+                        old_preds_dict = dict(enumerate(old_predictions))
+                        ground_truth_dict = dict(enumerate(proposal.subsample_ground_truth))
+                        old_f2 = self.val_evaluation_policy.compute_metric(
+                            old_preds_dict,
+                            ground_truth_dict
+                        )
+                        
+                        # Вычисляем F2 для нового кандидата
+                        new_preds_dict = dict(enumerate(proposal.subsample_predictions_after))
+                        new_f2 = self.val_evaluation_policy.compute_metric(
+                            new_preds_dict,
+                            ground_truth_dict
+                        )
+                        
+                        if new_f2 <= old_f2:
+                            self.logger.log(
+                                f"Iteration {state.i + 1}: New F2 score {new_f2} is not better than old score {old_f2}, skipping"
+                            )
+                            continue
+                        else:
+                            self.logger.log(
+                                f"Iteration {state.i + 1}: New F2 score {new_f2} is better than old score {old_f2}. Continue to full eval and add to candidate pool."
+                            )
                 else:
                     self.logger.log(
-                        f"Iteration {state.i + 1}: New subsample score {new_sum} is better than old score {old_sum}. Continue to full eval and add to candidate pool."
+                        f"Iteration {state.i + 1}: Mismatch in predictions/ground_truth lengths, "
+                        f"falling back to sum() for reflective mutation acceptance"
                     )
+                    # Acceptance: require strict improvement on subsample
+                    old_sum = sum(proposal.subsample_scores_before or [])
+                    new_sum = sum(proposal.subsample_scores_after or [])
+                    if new_sum <= old_sum:
+                        self.logger.log(
+                            f"Iteration {state.i + 1}: New subsample score {new_sum} is not better than old score {old_sum}, skipping"
+                        )
+                        continue
+                    else:
+                        self.logger.log(
+                            f"Iteration {state.i + 1}: New subsample score {new_sum} is better than old score {old_sum}. Continue to full eval and add to candidate pool."
+                        )
 
                 # Accept: full eval + add
                 self._run_full_eval_and_add(

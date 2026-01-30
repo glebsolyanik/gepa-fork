@@ -10,7 +10,15 @@ RolloutOutput = TypeVar("RolloutOutput")
 Trajectory = TypeVar("Trajectory")
 DataInst = TypeVar("DataInst")
 Candidate = dict[str, str]
-EvaluatorFn = Callable[[list[DataInst], Candidate], tuple[list[RolloutOutput], list[float]]]
+EvaluatorFn = Callable[
+  [list[DataInst], Candidate], 
+  tuple[
+    list[RolloutOutput], 
+    list[float],
+    list[Any] | None,
+    list[Any] | None,
+  ],
+]
 
 
 @dataclass
@@ -30,6 +38,9 @@ class EvaluationBatch(Generic[Trajectory, RolloutOutput]):
     outputs: list[RolloutOutput]
     scores: list[float]
     trajectories: list[Trajectory] | None = None
+
+    predictions: list[Any] | None = None  # predictions для каждого примера
+    ground_truth: list[Any] | None = None # ground truth для каждого примера
 
 
 class ProposalFn(Protocol):

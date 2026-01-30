@@ -4,7 +4,7 @@
 import os
 import random
 from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, Callable
 
 from gepa.adapters.default_adapter.default_adapter import ChatCompletionCallable, DefaultAdapter
 from gepa.core.adapter import DataInst, GEPAAdapter, RolloutOutput, Trajectory
@@ -68,7 +68,8 @@ def optimize(
     # Reproducibility
     seed: int = 0,
     raise_on_exception: bool = True,
-    val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | Literal["full_eval"] | None = None,
+    val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | Literal["full_eval", "f2"] | None = None,
+    f2_prediction_extractor: Callable[[Any], int] | None = None,
 ) -> GEPAResult[RolloutOutput, DataId]:
     """
     GEPA is an evolutionary optimizer that evolves (multiple) text components of a complex system to optimize them towards a given metric.
@@ -252,6 +253,9 @@ def optimize(
 
     if val_evaluation_policy is None or val_evaluation_policy == "full_eval":
         val_evaluation_policy = FullEvaluationPolicy()
+    elif val_evaluation_policy == "f2":
+        from gepa.strategies.eval_policy import F2EvaluationPolicy
+        val_evaluation_policy = F2EvaluationPolicy(prediction_extractor=f2_prediction_extractor)
     elif not isinstance(val_evaluation_policy, EvaluationPolicy):
         raise ValueError(
             f"val_evaluation_policy should be one of 'full_eval' or an instance of EvaluationPolicy, but got {type(val_evaluation_policy)}"
@@ -307,9 +311,14 @@ def optimize(
         reflection_prompt_template=reflection_prompt_template,
     )
 
-    def evaluator(inputs: list[DataInst], prog: dict[str, str]) -> tuple[list[RolloutOutput], list[float]]:
+    def evaluator(inputs: list[DataInst], prog: dict[str, str]) -> tuple[
+        list[RolloutOutput], 
+        list[float],
+        list[Any] | None,
+        list[Any] | None,
+    ]:
         eval_out = active_adapter.evaluate(inputs, prog, capture_traces=False)
-        return eval_out.outputs, eval_out.scores
+        return eval_out.outputs, eval_out.scores, eval_out.predictions, eval_out.ground_truth
 
     merge_proposer: MergeProposer | None = None
     if use_merge:

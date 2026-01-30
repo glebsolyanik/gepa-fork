@@ -20,6 +20,10 @@ class CandidateProposal(Generic[DataId]):
     tag: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    subsample_predictions_before: list[list[Any]] | None = None  # Список списков для каждого родителя
+    subsample_predictions_after: list[Any] | None = None
+    subsample_ground_truth: list[Any] | None = None
+
 
 class ProposeNewCandidate(Protocol[DataId]):
     """

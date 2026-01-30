@@ -110,6 +110,10 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
         state.total_num_evals += len(subsample_ids)
         state.full_program_trace[-1]["subsample_scores"] = eval_curr.scores
 
+        # Извлекаем predictions и ground_truth из EvaluationBatch
+        curr_predictions = getattr(eval_curr, 'predictions', None)
+        curr_ground_truth = getattr(eval_curr, 'ground_truth', None)
+
         if not eval_curr.trajectories or len(eval_curr.trajectories) == 0:
             self.logger.log(f"Iteration {i}: No trajectories captured. Skipping.")
             return None
@@ -151,6 +155,11 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
         state.total_num_evals += len(subsample_ids)
         state.full_program_trace[-1]["new_subsample_scores"] = eval_new.scores
 
+        # Извлекаем predictions из нового evaluation
+        new_predictions = getattr(eval_new, 'predictions', None)
+        new_ground_truth = getattr(eval_new, 'ground_truth', None) or curr_ground_truth
+
+
         new_sum = sum(eval_new.scores)
         self.experiment_tracker.log_metrics({"new_subsample_score": new_sum}, step=i)
 
@@ -161,4 +170,7 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
             subsample_scores_before=eval_curr.scores,
             subsample_scores_after=eval_new.scores,
             tag="reflective_mutation",
+            subsample_predictions_before=[curr_predictions] if curr_predictions else None,
+            subsample_predictions_after=new_predictions,
+            subsample_ground_truth=new_ground_truth or curr_ground_truth,
         )

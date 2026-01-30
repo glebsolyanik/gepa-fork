@@ -26,6 +26,9 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     parent_program_for_candidate: list[list[ProgramIdx | None]]
     prog_candidate_val_subscores: list[dict[DataId, float]]
 
+    prog_candidate_val_predictions: list[dict[DataId, Any]]  # predictions для каждого примера
+    prog_candidate_val_ground_truth: list[dict[DataId, Any]]  # ground truth для каждого примера
+
     pareto_front_valset: dict[DataId, float]
     program_at_pareto_front_valset: dict[DataId, set[ProgramIdx]]
 
@@ -63,6 +66,9 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         self.i = -1
 
         self.num_metric_calls_by_discovery = [0]
+
+        self.prog_candidate_val_predictions = [{}]  # начальное состояние
+        self.prog_candidate_val_ground_truth = [{}]  # начальное состояние
 
         if track_best_outputs:
             self.best_outputs_valset = {
@@ -218,10 +224,15 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         valset_outputs: dict[DataId, RolloutOutput] | None,
         run_dir: str | None,
         num_metric_calls_by_discovery_of_new_program: int,
+        valset_predictions: dict[DataId, Any] | None = None,
+        valset_ground_truth: dict[DataId, Any] | None = None,
     ) -> ProgramIdx:
         new_program_idx = len(self.program_candidates)
         self.program_candidates.append(new_program)
         self.num_metric_calls_by_discovery.append(num_metric_calls_by_discovery_of_new_program)
+
+        self.prog_candidate_val_predictions.append(valset_predictions or {})
+        self.prog_candidate_val_ground_truth.append(valset_ground_truth or {})
 
         max_predictor_id = max(
             [self.named_predictor_id_to_update_next_for_program_candidate[p] for p in parent_program_idx],
@@ -249,7 +260,14 @@ def initialize_gepa_state(
     run_dir: str | None,
     logger: LoggerProtocol,
     seed_candidate: dict[str, str],
-    valset_evaluator: Callable[[dict[str, str]], tuple[dict[DataId, RolloutOutput], dict[DataId, float]]],
+    valset_evaluator: Callable[
+        [dict[str, str]], 
+        tuple[
+            dict[DataId, RolloutOutput], 
+            dict[DataId, float],
+            dict[DataId, Any] | None,
+            dict[DataId, Any] | None,
+        ]],
     track_best_outputs: bool = False,
 ) -> GEPAState[RolloutOutput, DataId]:
     if run_dir is not None and os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
@@ -258,7 +276,15 @@ def initialize_gepa_state(
     else:
         num_evals_run = 0
 
-        seed_val_outputs, seed_val_scores = valset_evaluator(seed_candidate)
+        result = valset_evaluator(seed_candidate)
+        
+        if len(result) == 2:
+            seed_val_outputs, seed_val_scores = result
+            seed_val_predictions = None
+            seed_val_ground_truth = None
+        else:
+            seed_val_outputs, seed_val_scores, seed_val_predictions, seed_val_ground_truth = result
+
         if run_dir is not None:
             write_eval_scores_to_directory(seed_val_scores, os.path.join(run_dir, "generated_best_outputs_valset"))
         num_evals_run += len(seed_val_scores)
@@ -268,6 +294,11 @@ def initialize_gepa_state(
             (seed_val_outputs, seed_val_scores),
             track_best_outputs=track_best_outputs,
         )
+
+        if seed_val_predictions is not None:
+            gepa_state.prog_candidate_val_predictions[0] = seed_val_predictions
+        if seed_val_ground_truth is not None:
+            gepa_state.prog_candidate_val_ground_truth[0] = seed_val_ground_truth
 
         gepa_state.num_full_ds_evals = 1
         gepa_state.total_num_evals = num_evals_run

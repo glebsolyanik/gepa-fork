@@ -325,7 +325,22 @@ class MergeProposer(ProposeNewCandidate[DataId]):
         id2_sub_scores = [state.prog_candidate_val_subscores[id2][k] for k in subsample_ids]
         state.full_program_trace[-1]["subsample_ids"] = subsample_ids
 
-        _, new_sub_scores = self.evaluator(mini_devset, new_program)
+        _, new_sub_scores, new_sub_predictions, new_sub_ground_truth = self.evaluator(mini_devset, new_program)
+
+        id1_sub_predictions = None
+        id2_sub_predictions = None
+        subsample_ground_truth = new_sub_ground_truth
+
+        # Пытаемся получить predictions для родителей из state
+        if (hasattr(state, 'prog_candidate_val_predictions') and 
+            len(state.prog_candidate_val_predictions) > max(id1, id2)):
+            if id1 < len(state.prog_candidate_val_predictions):
+                id1_predictions_dict = state.prog_candidate_val_predictions[id1]
+                id1_sub_predictions = [id1_predictions_dict.get(k) for k in subsample_ids]
+            if id2 < len(state.prog_candidate_val_predictions):
+                id2_predictions_dict = state.prog_candidate_val_predictions[id2]
+                id2_sub_predictions = [id2_predictions_dict.get(k) for k in subsample_ids]
+
 
         state.full_program_trace[-1]["id1_subsample_scores"] = id1_sub_scores
         state.full_program_trace[-1]["id2_subsample_scores"] = id2_sub_scores
@@ -343,4 +358,7 @@ class MergeProposer(ProposeNewCandidate[DataId]):
             subsample_scores_after=new_sub_scores,
             tag="merge",
             metadata={"ancestor": ancestor},
+            subsample_predictions_before=[id1_sub_predictions, id2_sub_predictions] if (id1_sub_predictions and id2_sub_predictions) else None,
+            subsample_predictions_after=new_sub_predictions,
+            subsample_ground_truth=subsample_ground_truth,
         )
