@@ -12,7 +12,7 @@ from gepa.logging.logger import LoggerProtocol
 from gepa.logging.utils import log_detailed_metrics_after_discovering_new_program
 from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
-from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
+from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy, F2EvaluationPolicy
 from gepa.utils import StopperProtocol
 
 # Import tqdm for progress bar functionality
@@ -125,6 +125,12 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         state.num_full_ds_evals += 1
         state.total_num_evals += len(valset_subscores)
 
+        use_f2_semantics = isinstance(self.val_evaluation_policy, F2EvaluationPolicy)
+        f2_beta = 2.0
+        prediction_extractor = None
+        if use_f2_semantics and hasattr(self.val_evaluation_policy, 'prediction_extractor'):
+            prediction_extractor = self.val_evaluation_policy.prediction_extractor
+
         new_program_idx = state.update_state_with_new_program(
             parent_program_idx=parent_program_idx,
             new_program=new_program,
@@ -134,6 +140,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             num_metric_calls_by_discovery_of_new_program=num_metric_calls_by_discovery,
             valset_predictions=valset_predictions,
             valset_ground_truth=valset_ground_truth,
+            use_f2_semantics=use_f2_semantics,
+            f2_beta=f2_beta,
+            prediction_extractor=prediction_extractor,
         )
         state.full_program_trace[-1]["new_program_idx"] = new_program_idx
         state.full_program_trace[-1]["evaluated_val_indices"] = sorted(valset_subscores.keys())
@@ -224,6 +233,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             seed_candidate=self.seed_candidate,
             valset_evaluator=valset_evaluator,
             track_best_outputs=self.track_best_outputs,
+            val_evaluation_policy=self.val_evaluation_policy,
         )
 
         # Log base program score
@@ -355,7 +365,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     self.merge_proposer.last_iter_found_new_program = False
 
                 # 2) Reflective mutation proposer
-                proposal = self.reflective_proposer.propose(state)
+                proposal = self.reflective_proposer.propose(state, self.val_evaluation_policy)
                 if proposal is None:
                     self.logger.log(f"Iteration {state.i + 1}: Reflective mutation did not propose a new candidate")
                     continue

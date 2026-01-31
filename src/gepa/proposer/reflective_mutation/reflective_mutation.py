@@ -15,6 +15,7 @@ from gepa.proposer.reflective_mutation.base import (
 )
 from gepa.strategies.batch_sampler import BatchSampler
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from gepa.strategies.eval_policy import EvaluationPolicy
 
 
 class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
@@ -89,7 +90,7 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
             )["new_instruction"]
         return new_texts
 
-    def propose(self, state: GEPAState) -> CandidateProposal | None:
+    def propose(self, state: GEPAState, val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None) -> CandidateProposal | None:
         i = state.i + 1
 
         curr_prog_id = self.candidate_selector.select_candidate_idx(state)
@@ -123,6 +124,9 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
             return None
 
         self.experiment_tracker.log_metrics({"subsample_score": sum(eval_curr.scores)}, step=i)
+        if curr_predictions and curr_ground_truth and val_evaluation_policy:
+            f2_score = val_evaluation_policy.compute_metric(curr_predictions, curr_ground_truth)
+            self.experiment_tracker.log_metrics({"subsample_f2_score": f2_score}, step=i)
 
         # 2) Decide which predictors to update
         predictor_names_to_update = self.module_selector(
@@ -162,6 +166,9 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
 
         new_sum = sum(eval_new.scores)
         self.experiment_tracker.log_metrics({"new_subsample_score": new_sum}, step=i)
+        if new_predictions and new_ground_truth and val_evaluation_policy:
+            f2_score = val_evaluation_policy.compute_metric(new_predictions, new_ground_truth)
+            self.experiment_tracker.log_metrics({"new_subsample_f2_score": f2_score}, step=i)
 
         return CandidateProposal(
             candidate=new_candidate,

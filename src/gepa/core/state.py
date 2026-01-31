@@ -8,9 +8,10 @@ from collections.abc import Callable
 from typing import Any, ClassVar, Generic
 
 from gepa.core.adapter import RolloutOutput
-from gepa.core.data_loader import DataId
+from gepa.core.data_loader import DataId, DataInst
 from gepa.gepa_utils import json_default
 from gepa.logging.logger import LoggerProtocol
+from gepa.strategies.eval_policy import EvaluationPolicy
 
 # Types for GEPAState
 ProgramIdx = int
@@ -47,11 +48,14 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
     validation_schema_version: int
 
+    val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None
+
     def __init__(
         self,
         seed_candidate: dict[str, str],
         base_valset_eval_output: tuple[dict[DataId, RolloutOutput], dict[DataId, float]],
         track_best_outputs: bool = False,
+        val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None
     ):
         base_outputs, base_scores = base_valset_eval_output
         self.program_candidates = [seed_candidate]
@@ -79,6 +83,8 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
         self.full_program_trace = []
         self.validation_schema_version = self._VALIDATION_SCHEMA_VERSION
+
+        self.val_evaluation_policy = val_evaluation_policy
 
     def is_consistent(self) -> bool:
         assert len(self.program_candidates) == len(self.parent_program_for_candidate)
@@ -124,6 +130,9 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
         state = GEPAState.__new__(GEPAState)
         state.__dict__.update(data)
+
+        if "val_evaluation_policy" not in state.__dict__:
+            state.val_evaluation_policy = None
 
         assert len(state.program_candidates) == len(state.program_full_scores_val_set)
         assert len(state.pareto_front_valset) == len(state.program_at_pareto_front_valset)
@@ -182,10 +191,16 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     @property
     def program_full_scores_val_set(self) -> list[float]:
         # TODO: This should be using the val_evaluation_policy instead of the get_program_average_val_subset method to calculate the scores.
-        return [
-            self.get_program_average_val_subset(program_idx)[0]
-            for program_idx in range(len(self.prog_candidate_val_subscores))
-        ]
+        if self.val_evaluation_policy is not None:
+            return [
+                self.val_evaluation_policy.get_valset_score(program_idx, self)
+                for program_idx in range(len(self.prog_candidate_val_subscores))
+            ]
+        else:
+            return [
+                self.get_program_average_val_subset(program_idx)[0]
+                for program_idx in range(len(self.prog_candidate_val_subscores))
+            ]
 
     def _update_pareto_front_for_val_id(
         self,
@@ -226,6 +241,9 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         num_metric_calls_by_discovery_of_new_program: int,
         valset_predictions: dict[DataId, Any] | None = None,
         valset_ground_truth: dict[DataId, Any] | None = None,
+        use_f2_semantics: bool = False,
+        f2_beta: float = 2.0,
+        prediction_extractor: Callable[[Any], int] | None = None,
     ) -> ProgramIdx:
         new_program_idx = len(self.program_candidates)
         self.program_candidates.append(new_program)
@@ -241,11 +259,94 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         self.named_predictor_id_to_update_next_for_program_candidate.append(max_predictor_id)
         self.parent_program_for_candidate.append(list(parent_program_idx))
 
+        if use_f2_semantics:
+            valset_subscores = _transform_scores_to_f2_semantics(
+                valset_subscores,
+                valset_predictions,
+                valset_ground_truth,
+                beta=f2_beta,
+                prediction_extractor=prediction_extractor,
+            )
+
         self.prog_candidate_val_subscores.append(valset_subscores)
         for val_id, score in valset_subscores.items():
             valset_output = valset_outputs.get(val_id) if valset_outputs else None
             self._update_pareto_front_for_val_id(val_id, score, new_program_idx, valset_output, run_dir, self.i + 1)
         return new_program_idx
+
+def _transform_scores_to_f2_semantics(
+    scores: dict[DataId, float],
+    predictions: dict[DataId, Any] | None,
+    ground_truth: dict[DataId, Any] | None,
+    beta: float = 2.0,
+    prediction_extractor: Callable[[Any], int] | None = None,
+) -> dict[DataId, float]:
+    """
+    Трансформирует per-instance scores в F2-семантику для Парето-сравнения.
+    
+    F2-семантика:
+    - TP = +β² (для F2: β=2 → +4)
+    - FN = −β² (для F2: β=2 → -4)
+    - TN = +1
+    - FP = −1
+    
+    Это сохраняет per-instance вектор и делает TP/FN критичными для Парето.
+    
+    Args:
+        scores: Исходные per-instance scores
+        predictions: Predictions для каждого примера
+        ground_truth: Ground truth для каждого примера
+        beta: Beta параметр для F-метрики (по умолчанию 2 для F2)
+        prediction_extractor: Функция для извлечения бинарного prediction
+        
+    Returns:
+        Трансформированные scores с F2-семантикой
+    """
+    if not predictions or not ground_truth:
+        # Если нет predictions/ground_truth, возвращаем исходные scores
+        return scores
+    
+    beta_squared = beta * beta
+    transformed_scores: dict[DataId, float] = {}
+    
+    # Получаем все val_ids, для которых есть и predictions, и ground_truth
+    all_ids = set(scores.keys()) & set(predictions.keys()) & set(ground_truth.keys())
+    
+    for val_id in all_ids:
+        pred = predictions[val_id]
+        gt = ground_truth[val_id]
+        
+        # Извлекаем бинарные значения
+        if prediction_extractor:
+            pred_binary = prediction_extractor(pred)
+            gt_binary = prediction_extractor(gt)
+        else:
+            # По умолчанию: пытаемся преобразовать в int
+            pred_binary = int(pred) if isinstance(pred, (int, float, bool)) else 0
+            gt_binary = int(gt) if isinstance(gt, (int, float, bool)) else 0
+        
+        # Определяем TP/FN/TN/FP
+        if gt_binary == 1:
+            if pred_binary == 1:
+                # True Positive
+                transformed_scores[val_id] = beta_squared
+            else:
+                # False Negative
+                transformed_scores[val_id] = -beta_squared
+        else:  # gt_binary == 0
+            if pred_binary == 1:
+                # False Positive
+                transformed_scores[val_id] = -1.0
+            else:
+                # True Negative
+                transformed_scores[val_id] = 1.0
+    
+    # Для val_ids, для которых нет predictions/ground_truth, используем исходные scores
+    for val_id in scores.keys():
+        if val_id not in transformed_scores:
+            transformed_scores[val_id] = scores[val_id]
+    
+    return transformed_scores
 
 
 def write_eval_scores_to_directory(scores: dict[DataId, float], output_dir: str) -> None:
@@ -269,10 +370,13 @@ def initialize_gepa_state(
             dict[DataId, Any] | None,
         ]],
     track_best_outputs: bool = False,
+    val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None,
 ) -> GEPAState[RolloutOutput, DataId]:
     if run_dir is not None and os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
         logger.log("Loading gepa state from run dir")
         gepa_state = GEPAState.load(run_dir)
+        if val_evaluation_policy is not None:
+            gepa_state.val_evaluation_policy = val_evaluation_policy
     else:
         num_evals_run = 0
 
@@ -293,6 +397,7 @@ def initialize_gepa_state(
             seed_candidate,
             (seed_val_outputs, seed_val_scores),
             track_best_outputs=track_best_outputs,
+            val_evaluation_policy=val_evaluation_policy
         )
 
         if seed_val_predictions is not None:
