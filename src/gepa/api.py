@@ -278,9 +278,15 @@ def optimize(
     if batch_sampler == "epoch_shuffled":
         batch_sampler = EpochShuffledBatchSampler(minibatch_size=reflection_minibatch_size or 3, rng=rng)
     else:
-        assert reflection_minibatch_size is None, (
-            "reflection_minibatch_size only accepted if batch_sampler is 'epoch_shuffled'"
-        )
+        if reflection_minibatch_size is not None:
+            import warnings
+            warnings.warn(
+                f"reflection_minibatch_size={reflection_minibatch_size} is ignored when batch_sampler "
+                f"is already a BatchSampler instance (not a string). "
+                f"The minibatch_size should be set when creating the BatchSampler instance.",
+                UserWarning,
+                stacklevel=2
+            )
 
     experiment_tracker = create_experiment_tracker(
         use_wandb=use_wandb,
