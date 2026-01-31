@@ -5,13 +5,16 @@ import json
 import os
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, ClassVar, Generic
+from typing import Any, ClassVar, Generic, TYPE_CHECKING
 
 from gepa.core.adapter import RolloutOutput
 from gepa.core.data_loader import DataId, DataInst
 from gepa.gepa_utils import json_default
 from gepa.logging.logger import LoggerProtocol
-from gepa.strategies.eval_policy import EvaluationPolicy
+
+if TYPE_CHECKING:
+    from gepa.strategies.eval_policy import EvaluationPolicy
+
 
 # Types for GEPAState
 ProgramIdx = int
@@ -48,14 +51,14 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
     validation_schema_version: int
 
-    val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None
+    val_evaluation_policy: "EvaluationPolicy[DataId, DataInst] | None"
 
     def __init__(
         self,
         seed_candidate: dict[str, str],
         base_valset_eval_output: tuple[dict[DataId, RolloutOutput], dict[DataId, float]],
         track_best_outputs: bool = False,
-        val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None
+        val_evaluation_policy: "EvaluationPolicy[DataId, DataInst] | None" = None
     ):
         base_outputs, base_scores = base_valset_eval_output
         self.program_candidates = [seed_candidate]
@@ -370,7 +373,7 @@ def initialize_gepa_state(
             dict[DataId, Any] | None,
         ]],
     track_best_outputs: bool = False,
-    val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None,
+    val_evaluation_policy: "EvaluationPolicy[DataId, DataInst] | None" = None,
 ) -> GEPAState[RolloutOutput, DataId]:
     if run_dir is not None and os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
         logger.log("Loading gepa state from run dir")
