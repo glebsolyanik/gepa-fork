@@ -125,7 +125,9 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
 
         self.experiment_tracker.log_metrics({"subsample_score": sum(eval_curr.scores)}, step=i)
         if curr_predictions and curr_ground_truth and val_evaluation_policy:
-            f2_score = val_evaluation_policy.compute_metric(curr_predictions, curr_ground_truth)
+            curr_predictions_dict = dict(enumerate(curr_predictions))
+            curr_ground_truth_dict = dict(enumerate(curr_ground_truth))
+            f2_score = val_evaluation_policy.compute_metric(curr_predictions_dict, curr_ground_truth_dict)
             self.experiment_tracker.log_metrics({"subsample_f2_score": f2_score}, step=i)
 
         # 2) Decide which predictors to update
@@ -167,7 +169,9 @@ class ReflectiveMutationProposer(ProposeNewCandidate[DataId]):
         new_sum = sum(eval_new.scores)
         self.experiment_tracker.log_metrics({"new_subsample_score": new_sum}, step=i)
         if new_predictions and new_ground_truth and val_evaluation_policy:
-            f2_score = val_evaluation_policy.compute_metric(new_predictions, new_ground_truth)
+            new_predictions_dict = dict(enumerate(new_predictions))
+            new_ground_truth_dict = dict(enumerate(new_ground_truth))
+            f2_score = val_evaluation_policy.compute_metric(new_predictions_dict, new_ground_truth_dict)
             self.experiment_tracker.log_metrics({"new_subsample_f2_score": f2_score}, step=i)
 
         return CandidateProposal(
