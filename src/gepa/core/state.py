@@ -120,11 +120,11 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             pickle.dump(serialized, f)
 
     @staticmethod
-    def load(run_dir: str) -> "GEPAState[RolloutOutput, DataId]":
+    def load(run_dir: str, use_cloudpickle: bool = False) -> "GEPAState[RolloutOutput, DataId]":
         with open(os.path.join(run_dir, "gepa_state.bin"), "rb") as f:
-            try:
+            if use_cloudpickle:
                 import cloudpickle as pickle
-            except ImportError:
+            else:
                 import pickle
 
             data = pickle.load(f)
@@ -377,10 +377,11 @@ def initialize_gepa_state(
         ]],
     track_best_outputs: bool = False,
     val_evaluation_policy: "EvaluationPolicy[DataId, DataInst] | None" = None,
+    use_cloudpickle: bool = False,
 ) -> GEPAState[RolloutOutput, DataId]:
     if run_dir is not None and os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
         logger.log("Loading gepa state from run dir")
-        gepa_state = GEPAState.load(run_dir)
+        gepa_state = GEPAState.load(run_dir, use_cloudpickle=use_cloudpickle)
         if val_evaluation_policy is not None:
             gepa_state.val_evaluation_policy = val_evaluation_policy
     else:

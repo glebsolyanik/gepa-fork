@@ -234,6 +234,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             valset_evaluator=valset_evaluator,
             track_best_outputs=self.track_best_outputs,
             val_evaluation_policy=self.val_evaluation_policy,
+            use_cloudpickle=self.use_cloudpickle,
         )
 
         # Log base program score
