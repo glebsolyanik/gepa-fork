@@ -122,7 +122,10 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     @staticmethod
     def load(run_dir: str) -> "GEPAState[RolloutOutput, DataId]":
         with open(os.path.join(run_dir, "gepa_state.bin"), "rb") as f:
-            import pickle
+            try:
+                import cloudpickle as pickle
+            except ImportError:
+                import pickle
 
             data = pickle.load(f)
 
